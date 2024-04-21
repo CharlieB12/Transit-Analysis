@@ -114,7 +114,7 @@ class InfoTabs2(QTabWidget):
 
         #Button to apply buffer
         self.apply_buffer_button = QPushButton("Calculate Coverage")
-        self.apply_buffer_button.clicked.connect(self.apply_buffer)
+        self.apply_buffer_button.clicked.connect(self.calculate_coverage)
         layout1.addWidget(self.apply_buffer_button)
         
         # Get all layers in the project
@@ -201,8 +201,8 @@ class InfoTabs2(QTabWidget):
         iface.messageBar().pushMessage('Information', 'Selected Points Cleared', level=Qgis.Info)
         
 
-    #Function to apply buffer to selected points
-    def apply_buffer(self):
+    #Function to calculate coverage of seleced points
+    def calculate_coverage(self):
         
         #Grabs layers in dropdown boxes
         point_data = self.point_dropdown.currentData()
@@ -211,7 +211,6 @@ class InfoTabs2(QTabWidget):
         population = self.table_dropdown.currentData()
         pop_join = self.pop_join_dropdown.currentData()
         area = self.area_dropdown.currentData()
-        
         
         
         
@@ -279,7 +278,9 @@ class InfoTabs2(QTabWidget):
     
         selected_features = iface.activeLayer().selectedFeatures()
         new_layer = selected_features_to_layer(selected_features)
-        
+        '''
+        Buffer
+        '''
         #Apply buffer to the new layer (selected points)
         buffer_output = QgsProcessingUtils.generateTempFilename('/buffer.shp')
         if os.path.exists(buffer_output):
@@ -292,15 +293,60 @@ class InfoTabs2(QTabWidget):
           'OUTPUT': buffer_output})
         
         buffer_layer = QgsVectorLayer(buffer_output, 'Buffer', 'ogr')
-        #Checks if buffer layer is correct crs
-        if not buffer_layer.isValid():
-            print("Buffer layer is not valid. Check if the output file was created correctly.")
-        else:
-            #Set a valid CRS for the buffer layer
-            buffer_layer.setCrs(layer.crs())
+        buffer_layer.setCrs(layer.crs())
         
         #Add buffer layer to map
-        QgsProject.instance().addMapLayer(buffer_layer)
+        
+        '''
+        Intersect buffer with tract (For calculating percent coverage overlap)
+        '''
+        buffer_intersect_output = QgsProcessingUtils.generateTempFilename('/buffer_intersect.shp')
+        if os.path.exists(buffer_intersect_output):
+            driver.DeleteDataSource(buffer_intersect_output)
+        
+        buffer_intersect = processing.run('qgis:intersection', {
+            'INPUT': polygon_data,
+            'OVERLAY': buffer_layer,
+            'OUTPUT': buffer_intersect_output})
+        
+        buffer_intersect_layer = QgsVectorLayer(buffer_intersect_output, 'Buffer Intersect', 'ogr')
+        buffer_intersect_layer.setCrs(buffer_layer.crs())
+        
+        '''
+        Intersecting buffers on eachother to get overlapping coverage
+        '''
+        layer_id = ''
+        for field in buffer_layer.fields():
+            #4 represents integer
+            if field.type() == 4:
+                layer_id = field.name()
+                break
+    
+        print(layer_id)
+        
+        buffer_self_intersect_output = QgsProcessingUtils.generateTempFilename('/self_intersect.shp')
+        if os.path.exists(buffer_self_intersect_output):
+            driver.DeleteDataSource(buffer_self_intersect_output)
+        
+        self_intersect = processing.run('saga:polygonselfintersection', {
+            'POLYGONS': buffer_layer,
+            'INTERSECT': buffer_self_intersect_output,
+            'ID': layer_id})
+        
+        
+        #TODO: Go through the attribute table and filter out the attributes that are not null.
+        #The nulls represent the overlapped coverage
+        
+        
+        self_intersect_layer = QgsVectorLayer(buffer_self_intersect_output, 'Self Intersect', 'ogr')
+        self_intersect_layer.setCrs(buffer_layer.crs())
+        QgsProject.instance().addMapLayer(self_intersect_layer)
+        
+        
+        
+        
+        
+        
         
         
     def getToolLabel(self):
