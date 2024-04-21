@@ -1,5 +1,5 @@
 from qgis.gui import QgsMapToolIdentify
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QVariant
 from PyQt5.QtWidgets import (
     QPushButton,
     QVBoxLayout,
@@ -11,7 +11,17 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QLineEdit
 )
-from qgis.core import QgsWkbTypes, QgsProject, edit
+from qgis.core import (
+    QgsWkbTypes,
+    QgsProject,
+    edit,
+    QgsVectorLayer,
+    QgsField,
+    QgsFields,
+    QgsFeature,
+    QgsGeometry,
+    QgsProject
+    )
 
 
 class SelectTool(QgsMapToolIdentify):
@@ -76,11 +86,6 @@ class InfoTabs2(QTabWidget):
         self.button.clicked.connect(self.on_button_clicked)
         layout1.addWidget(self.button)
         
-        #Dropdown for selecting point layer
-        self.point_dropdown = QComboBox()
-        self.point_dropdown.addItem("Select Point Layer")
-        layout1.addWidget(self.point_dropdown)
-
 
         #Dropdown for selecting polygon layer
         self.polygon_dropdown = QComboBox()
@@ -122,9 +127,7 @@ class InfoTabs2(QTabWidget):
 
         # Filter layers by geometry type and populate dropdowns
         for layer in self.layers:
-            if layer.geometryType() == QgsWkbTypes.PointGeometry:
-                self.point_dropdown.addItem(layer.name(), layer)
-            elif layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+            if layer.geometryType() == QgsWkbTypes.PolygonGeometry:
                 self.polygon_dropdown.addItem(layer.name(), layer)
             elif layer.geometryType() != QgsWkbTypes.PointGeometry and layer.geometryType() != QgsWkbTypes.PolygonGeometry:
                 self.table_dropdown.addItem(layer.name(), layer)
@@ -188,10 +191,6 @@ class InfoTabs2(QTabWidget):
                 self.pop_join_dropdown.addItem(field.name(), field)
     
     
-    '''
-    Geoprocessing section (On button press)
-    '''
-    
     #Clears selected points from map
     def on_button_clicked(self):
         l = iface.activeLayer()
@@ -200,12 +199,14 @@ class InfoTabs2(QTabWidget):
         self.toolText.setText('all cleared')
         iface.messageBar().pushMessage('Information', 'Selected Points Cleared', level=Qgis.Info)
         
-
+    
+    '''
+    Geoprocessing section
+    '''
     #Function to calculate coverage of seleced points
     def calculate_coverage(self):
         
         #Grabs layers in dropdown boxes
-        point_data = self.point_dropdown.currentData()
         polygon_data = self.polygon_dropdown.currentData()
         poly_join = self.poly_join_dropdown.currentData()
         population = self.table_dropdown.currentData()
@@ -315,14 +316,13 @@ class InfoTabs2(QTabWidget):
         '''
         Intersecting buffers on eachother to get overlapping coverage
         '''
+        #Finds first occurence of numeric field for self intersect funtion
         layer_id = ''
         for field in buffer_layer.fields():
             #4 represents integer
             if field.type() == 4:
                 layer_id = field.name()
                 break
-    
-        print(layer_id)
         
         buffer_self_intersect_output = QgsProcessingUtils.generateTempFilename('/self_intersect.shp')
         if os.path.exists(buffer_self_intersect_output):
@@ -333,17 +333,64 @@ class InfoTabs2(QTabWidget):
             'INTERSECT': buffer_self_intersect_output,
             'ID': layer_id})
         
-        
-        #TODO: Go through the attribute table and filter out the attributes that are not null.
-        #The nulls represent the overlapped coverage
-        
-        
         self_intersect_layer = QgsVectorLayer(buffer_self_intersect_output, 'Self Intersect', 'ogr')
         self_intersect_layer.setCrs(buffer_layer.crs())
-        QgsProject.instance().addMapLayer(self_intersect_layer)
+        
+        '''
+        Filter out the non overlapping geometry
+        '''
+        provider = self_intersect_layer.dataProvider()
+        #All the overlapped geometries have a layer_id of 0
+        non_overlap = [f.id() for f in self_intersect_layer.getFeatures() if f[layer_id] > 0]
+        res = provider.deleteFeatures(non_overlap)
+        layer.updateExtents()
+        layer.triggerRepaint()
+        
+        '''
+        Dissolve overlaps
+        '''
+        dissolve_output = QgsProcessingUtils.generateTempFilename('/dissolve.shp')
+        if os.path.exists(dissolve_output):
+            driver.DeleteDataSource(dissolve_output)
+        
+        dissolve_layer = processing.run('qgis:dissolve', {
+            'INPUT':self_intersect_layer,
+            'FIELD':layer_id,
+            'OUTPUT': dissolve_output})
+        
+        dissolve = QgsVectorLayer(dissolve_output, 'Overlapping Coverage', 'ogr')
+        
+        '''
+        Intersect Overlaps with tract
+        '''
+        overlap_intersect_output = QgsProcessingUtils.generateTempFilename('/overlap_intersect.shp')
+        if os.path.exists(overlap_intersect_output):
+            driver.DeleteDataSource(overlap_intersect_output) 
+        
+        overlap_intersect = processing.run('qgis:intersection', {
+            'INPUT': polygon_data,
+            'OVERLAY': dissolve,
+            'OUTPUT': overlap_intersect_output})
+        
+        overlap_intersect_layer = QgsVectorLayer(overlap_intersect_output, 'Overlapping Coverage Intersection', 'ogr')
+        overlap_intersect_layer.setCrs(buffer_layer.crs())
         
         
+        '''
+        Join population with intersected overlaps
+        '''
+        joined_layer = processing.run('qgis:joinattributestable', {
+            'INPUT': overlap_intersect_layer,
+            'FIELD': poly_join.name(),
+            'INPUT_2': population,
+            'FIELD_2': pop_join.name(),
+            'OUTPUT': 'memory:'})
         
+        QgsProject.instance().addMapLayer(joined_layer['OUTPUT'])
+        
+        
+        #TODO: find the population proportion of the intersected overlaps.
+        #(intersect area/tract area) * P001001
         
         
         
