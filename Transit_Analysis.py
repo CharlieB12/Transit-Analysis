@@ -1,5 +1,6 @@
 from qgis.gui import QgsMapToolIdentify
 from PyQt5.QtCore import Qt, QVariant
+import math
 from PyQt5.QtWidgets import (
     QPushButton,
     QVBoxLayout,
@@ -20,10 +21,11 @@ from qgis.core import (
     QgsFields,
     QgsFeature,
     QgsGeometry,
-    QgsProject
+    QgsProject,
+    QgsMessageLog
     )
 
-
+#Class for enabling the selection of points
 class SelectTool(QgsMapToolIdentify):
     def __init__(self, canvas):
         QgsMapToolIdentify.__init__(self, canvas)
@@ -53,6 +55,7 @@ class SelectTool(QgsMapToolIdentify):
         for f in selection:
             print(f.attributes())
 
+#Class for populating our info tab with selected points
 class SelectTool2(SelectTool):
     def __init__(self, canvas, labelwidget, textwidget, cursor=Qt.ArrowCursor):
         SelectTool.__init__(self, canvas)
@@ -68,6 +71,7 @@ class SelectTool2(SelectTool):
         self.textwidget.setTextColor(QColor('blue'))
         self.textwidget.setText(textmsg)
 
+#Class for creating the tabs for tool
 class InfoTabs2(QTabWidget):
     def __init__(self, parent=None):
         super(InfoTabs2, self).__init__(parent)
@@ -102,6 +106,11 @@ class InfoTabs2(QTabWidget):
         self.table_dropdown.addItem("Select Table Layer")
         layout1.addWidget(self.table_dropdown)
         
+        #Dropdown for selecting population field
+        self.pop_field_dropdown = QComboBox()
+        self.pop_field_dropdown.addItem("Select Population Field")
+        layout1.addWidget(self.pop_field_dropdown)
+        
         #Dropdown for population join field
         self.pop_join_dropdown = QComboBox()
         self.pop_join_dropdown.addItem("Select Table Join Field")
@@ -117,7 +126,7 @@ class InfoTabs2(QTabWidget):
         self.buffer_radius_input.setPlaceholderText("Enter Buffer Radius (Miles)")
         layout1.addWidget(self.buffer_radius_input)
 
-        #Button to apply buffer
+        #Button to calculate coverage
         self.apply_buffer_button = QPushButton("Calculate Coverage")
         self.apply_buffer_button.clicked.connect(self.calculate_coverage)
         layout1.addWidget(self.apply_buffer_button)
@@ -180,6 +189,9 @@ class InfoTabs2(QTabWidget):
         #Clear existing items in the table join dropdown
         self.pop_join_dropdown.clear()
         self.pop_join_dropdown.addItem("Select Table Join Field")
+        #Clear existing items in the population field dropdown
+        self.pop_field_dropdown.clear()
+        self.pop_field_dropdown.addItem("Select Population Field")
         
         #Get the selected table layer
         selected_table_layer = self.table_dropdown.currentData()
@@ -189,6 +201,7 @@ class InfoTabs2(QTabWidget):
             fields = selected_table_layer.fields()
             for field in fields:
                 self.pop_join_dropdown.addItem(field.name(), field)
+                self.pop_field_dropdown.addItem(field.name(), field)
     
     
     #Clears selected points from map
@@ -210,8 +223,9 @@ class InfoTabs2(QTabWidget):
         polygon_data = self.polygon_dropdown.currentData()
         poly_join = self.poly_join_dropdown.currentData()
         population = self.table_dropdown.currentData()
+        pop_fld = self.pop_field_dropdown.currentData()
         pop_join = self.pop_join_dropdown.currentData()
-        area = self.area_dropdown.currentData()
+        area_fld = self.area_dropdown.currentData()
         
         
         
@@ -276,9 +290,11 @@ class InfoTabs2(QTabWidget):
 
             return layer
             
-    
+        #Grabs the selected points
         selected_features = iface.activeLayer().selectedFeatures()
+        #Creates new layer based on points
         new_layer = selected_features_to_layer(selected_features)
+
         '''
         Buffer
         '''
@@ -287,32 +303,39 @@ class InfoTabs2(QTabWidget):
         if os.path.exists(buffer_output):
             driver.DeleteDataSource(buffer_output)
         
+
         buffer = processing.run('native:buffer', {
           'INPUT': new_layer,
           'DISTANCE': buffer_radius * 1609,
           'SEGMENTS': 5,
           'OUTPUT': buffer_output})
         
-        buffer_layer = QgsVectorLayer(buffer_output, 'Buffer', 'ogr')
+        buffer_layer = QgsVectorLayer(buffer_output, 'Coverage', 'ogr')
         buffer_layer.setCrs(layer.crs())
         
-        #Add buffer layer to map
+        QgsProject.instance().addMapLayer(buffer_layer)
         
         '''
-        Intersect buffer with tract (For calculating percent coverage overlap)
+        Add areas to buffer
         '''
-        buffer_intersect_output = QgsProcessingUtils.generateTempFilename('/buffer_intersect.shp')
-        if os.path.exists(buffer_intersect_output):
-            driver.DeleteDataSource(buffer_intersect_output)
+        buffer_area_output = QgsProcessingUtils.generateTempFilename('/buffer_area.shp')
+        if os.path.exists(buffer_area_output):
+            driver.DeleteDataSource(buffer_area_output)
+            
+        buffer_area_out = processing.run('qgis:exportaddgeometrycolumns', {
+            'INPUT': buffer_layer,
+            'CALC_METHOD': '0',
+            'OUTPUT': buffer_area_output})
         
-        buffer_intersect = processing.run('qgis:intersection', {
-            'INPUT': polygon_data,
-            'OVERLAY': buffer_layer,
-            'OUTPUT': buffer_intersect_output})
+        buffer_area = QgsVectorLayer(buffer_area_output, 'Buffer Area', 'ogr')
         
-        buffer_intersect_layer = QgsVectorLayer(buffer_intersect_output, 'Buffer Intersect', 'ogr')
-        buffer_intersect_layer.setCrs(buffer_layer.crs())
         
+        #Get total buffer area
+        total_buffer_area = 0
+        for f in buffer_area.getFeatures():
+            total_buffer_area += f['area']
+        
+
         '''
         Intersecting buffers on eachother to get overlapping coverage
         '''
@@ -359,7 +382,7 @@ class InfoTabs2(QTabWidget):
             'OUTPUT': dissolve_output})
         
         dissolve = QgsVectorLayer(dissolve_output, 'Overlapping Coverage', 'ogr')
-        
+
         '''
         Intersect Overlaps with tract
         '''
@@ -375,26 +398,102 @@ class InfoTabs2(QTabWidget):
         overlap_intersect_layer = QgsVectorLayer(overlap_intersect_output, 'Overlapping Coverage Intersection', 'ogr')
         overlap_intersect_layer.setCrs(buffer_layer.crs())
         
-        
         '''
         Join population with intersected overlaps
         '''
-        joined_layer = processing.run('qgis:joinattributestable', {
+        joined_layer_output = QgsProcessingUtils.generateTempFilename('/joined_layer.shp')
+        if os.path.exists(joined_layer_output):
+            driver.DeleteDataSource(joined_layer_output)
+        
+        joined_layer_out = processing.run('qgis:joinattributestable', {
             'INPUT': overlap_intersect_layer,
             'FIELD': poly_join.name(),
             'INPUT_2': population,
             'FIELD_2': pop_join.name(),
-            'OUTPUT': 'memory:'})
+            'OUTPUT': joined_layer_output})
         
-        QgsProject.instance().addMapLayer(joined_layer['OUTPUT'])
+        joined_layer = QgsVectorLayer(joined_layer_output, 'joined_layer', 'ogr')
+        
+        '''
+        Get areas of overlapped tracts
+        '''
+        joined_layer_area_output = QgsProcessingUtils.generateTempFilename('/joined_layer_area.shp')
+        if os.path.exists(joined_layer_area_output):
+            driver.DeleteDataSource(joined_layer_area_output)
         
         
-        #TODO: find the population proportion of the intersected overlaps.
-        #(intersect area/tract area) * P001001
+        joined_layer_area_out = processing.run('qgis:exportaddgeometrycolumns', {
+            'INPUT': joined_layer,
+            'CALC_METHOD': '0',
+            'OUTPUT': joined_layer_area_output})
+        
+        joined_layer_area = QgsVectorLayer(joined_layer_area_output, 'Overlapping Coverage', 'ogr')
         
         
+        '''
+        Calculate new population of intersection tracts
+        '''
+        fieldname_area = 'area_2'
+        fldname_pop = 'NewPop'
+        total_joined_area = 0
+        
+        #Enables us to enter the joined layer
+        provider = joined_layer_area.dataProvider()
+        #Creates new field for proportionaly correct population
+        provider.addAttributes([QgsField(fldname_pop, QVariant.Double)])
+        joined_layer_area.updateFields()
+
+        #Loops through each feature and calculates the new population
+        field_id2 = provider.fieldNameIndex(fldname_pop)
+        for f in joined_layer_area.getFeatures():
+            newpop = f[pop_fld.name()] * f[fieldname_area] / f[area_fld.name()]
+            total_joined_area += f[fieldname_area]
+            provider.changeAttributeValues({f.id(): {field_id2:newpop}})
+        
+        QgsProject.instance().addMapLayer(joined_layer_area)
+        
+        '''
+        Find total population within overlaps
+        '''
+        total_pop_within_overlaps = 0
+        for f in joined_layer_area.getFeatures():
+            total_pop_within_overlaps += f[fldname_pop]
+        
+        '''
+        Find total population in tracts
+        '''
+        total_pop = 0
+        for f in population.getFeatures():
+            total_pop += f[pop_fld.name()]
         
         
+        #Calculates percent of overlapping coverage
+        percent_overlap = (total_joined_area/total_buffer_area)*100
+        percent_overlap = round(percent_overlap, 2)
+        QgsMessageLog.logMessage(f'Percent of coverage that overlaps: \
+        {percent_overlap}', "MyPlugin", level=Qgis.Info)
+        
+        #Message log for total population within overlapping coverage
+        QgsMessageLog.logMessage(f'Total population within overlapping coverage: \
+        {total_pop_within_overlaps}', "MyPlugin", level=Qgis.Info)
+        
+        #Calculate the percent of population within overlapping coverage
+        pop_prop = total_pop_within_overlaps / total_pop
+        pop_prop = round(pop_prop, 5)
+        QgsMessageLog.logMessage(f'Percent of total population within overlapping coverage: \
+        {pop_prop}', "MyPlugin", level=Qgis.Info)
+        
+        
+        #Popup box with our data
+        msg_box = QMessageBox()
+        
+        msg_box.setWindowTitle("Coverage Analysis")
+        msg_box.setText(f"Percent of coverage that overlaps: {percent_overlap}%\
+        \nTotal Population within overlapping coverage: {math.floor(total_pop_within_overlaps)}\
+        \nPercent of total population within overlapping coverage: {pop_prop}")
+        msg_box.setIcon(QMessageBox.Information)
+        
+        msg_box.exec()
         
     def getToolLabel(self):
         return self.toolLabel
