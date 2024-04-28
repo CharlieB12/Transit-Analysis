@@ -1,0 +1,47 @@
+# This file contains metadata for your plugin.
+
+# This file should be included when you package your plugin.# Mandatory items:
+
+[general]
+name=Transit Analysis Tool
+qgisMinimumVersion=3.0
+description=View transit stop coverage statistics
+version=0.1
+author=Team Transit Analysis
+email=britt.119@osu.edu
+
+about=This plugin allows the selection of transit stops (bus, train, bikeshare, etc.) in a QGIS environment so that buffers can be applied as a means to show spatial coverage. The main feature is its ability to show the total amount of overlapping coverage as well as population data tied to these areas.
+
+tracker=http://bugs
+repository=http://repo
+# End of mandatory metadata
+
+# Recommended items:
+
+hasProcessingProvider=no
+# Uncomment the following line and add your changelog:
+# changelog=
+
+# Tags are comma separated with spaces allowed
+tags=python
+
+homepage=http://homepage
+category=Plugins
+icon=icon.png
+# experimental flag
+experimental=False
+
+# deprecated flag (applies to the whole plugin, not just a single version)
+deprecated=False
+
+# Since QGIS 3.8, a comma separated list of plugins to be installed
+# (or upgraded) can be specified.
+# Check the documentation for more information.
+# plugin_dependencies=
+
+Category of the plugin: Raster, Vector, Database or Web
+# category=
+
+# If the plugin can run on QGIS Server.
+server=False
+
